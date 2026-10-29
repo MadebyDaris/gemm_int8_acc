@@ -1,0 +1,7 @@
+build/
+*.vcd
+*.vvp
+__pycache__/
+
+# Personal build notes and reference papers (kept locally, not published)
+notes/

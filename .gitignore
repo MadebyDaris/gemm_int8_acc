@@ -5,3 +5,4 @@ __pycache__/
 
 # Personal build notes and reference papers (kept locally, not published)
 notes/
+.*.swp

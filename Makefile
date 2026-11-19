@@ -21,7 +21,7 @@ sim-%:                         # make sim-pe   (extra flags: IVFLAGS="-Ptb_pe_ar
 	vvp -n build/tb_$*.vvp | tee build/tb_$*.log
 	@grep -q "TEST PASSED" build/tb_$*.log
 
-sim-tile sim-gemm_core: vectors   # model-driven tests need fresh vectors
+sim-tile sim-gemm_core sim-gemm_top: vectors   # model-driven tests need fresh vectors
 
 lint-%:                        # make lint-pe
 	verilator --lint-only -Wall -Irtl rtl/$*.sv

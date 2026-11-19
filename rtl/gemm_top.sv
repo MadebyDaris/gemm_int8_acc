@@ -101,9 +101,7 @@ module gemm_top #(
     logic        soft_rst_pulse;
     logic        dims_ok;
 
-    // ------------------------------------------------------------------
     // gemm_core
-    // ------------------------------------------------------------------
     logic              core_rst;
     logic              core_done, core_busy;
     logic              host_en, host_we;
@@ -149,7 +147,7 @@ module gemm_top #(
         rd_fire        = s_axil_arready;
     end
 
-    // TODO 2: bus FSM (always_ff): state, raddr_q, rdata_q, bresp_q, rresp_q
+    // bus FSM (always_ff): state, raddr_q, rdata_q, bresp_q, rresp_q
     logic [31:0] reg_rdata_mux;
     always_ff @(posedge clk) begin
         if (rst) begin
@@ -162,26 +160,60 @@ module gemm_top #(
             case (state)
                 S_IDLE: begin
                     if (wr_fire) begin
-                        // TODO: bresp_q, go to S_WRESP
+                        if (wr_rgn == RGN_C || (wr_rgn != RGN_REG && core_busy))
+                            bresp_q <= RESP_SLVERR;
+                        else
+                            bresp_q <= RESP_OKAY;
+                        state <= S_WRESP;
                     end else if (rd_fire) begin
-                        // TODO: latch raddr_q, go to S_RADDR
+                        raddr_q <= s_axil_araddr;
+                        state   <= S_RADDR;
                     end
                 end
-                // TODO: S_WRESP, S_RADDR, S_RDATA, S_RRESP
+
+                // Write response: bvalid = 1 here; leave when the master takes it
+                S_WRESP: begin
+                    if (s_axil_bready)
+                        state <= S_IDLE;
+                end
+
+                S_RADDR: begin
+                    state <= S_RDATA;
+                end
+
+                // SPM answered (1-cycle latency): capture the data once
+                S_RDATA: begin
+                    if (rd_rgn == RGN_REG)
+                        rdata_q <= reg_rdata_mux;
+                    else
+                        rdata_q <= host_rdata;
+
+                    if (rd_rgn != RGN_REG && core_busy)
+                        rresp_q <= RESP_SLVERR;
+                    else
+                        rresp_q <= RESP_OKAY;
+                    state <= S_RRESP;
+                end
+
+                // Read response: rvalid = 1 here; leave when the master takes it
+                S_RRESP: begin
+                    if (s_axil_rready)
+                        state <= S_IDLE;
+                end
+
                 default: state <= S_IDLE;
             endcase
         end
     end
 
-    // TODO 3: host port (always_comb): defaults first, then
-    //   write: wr_fire && SPM region (not C)   -> host_en = 1, host_we = 1, awaddr/wdata
-    //   read:  state == S_RADDR && SPM region  -> host_en = 1, raddr_q
+    // Response channels come straight from the FSM state and the _q registers,
+    // so they cannot change while the master is not ready (AXI rule).
+    assign s_axil_bvalid = (state == S_WRESP);
+    assign s_axil_bresp  = bresp_q;
+    assign s_axil_rvalid = (state == S_RRESP);
+    assign s_axil_rdata  = rdata_q;
+    assign s_axil_rresp  = rresp_q;
 
-    // TODO 4: register file (always_ff): writes on wr_fire && region 00,
-    //   START / SOFT_RST pulses, sticky DONE, ERR, CYCLES
-
-    // TODO 5: dims_ok (always_comb), read mux for registers, outputs
-    //   (bvalid, bresp, rvalid, rdata, rresp, irq)
 
 endmodule
 

@@ -4,7 +4,6 @@
 // GEMM accelerator top: AXI4-Lite slave + register file around gemm_core.
 // Register map: docs/SPECS.md. The SoC decoder strips the base address,
 // so this module only sees the 16-bit offset inside its 64 KB window.
-//
 //   addr[15:14]  region      addr[13:2]  word index (SPM) / register offset
 //   00           registers
 //   01           SPM A
@@ -206,13 +205,101 @@ module gemm_top #(
         end
     end
 
-    // Response channels come straight from the FSM state and the _q registers,
-    // so they cannot change while the master is not ready (AXI rule).
     assign s_axil_bvalid = (state == S_WRESP);
     assign s_axil_bresp  = bresp_q;
     assign s_axil_rvalid = (state == S_RRESP);
     assign s_axil_rdata  = rdata_q;
     assign s_axil_rresp  = rresp_q;
+
+    // Host port: combinational, the SPM samples it at the end of this cycle.
+    // Write in the wr_fire cycle (only then are awaddr/wdata valid),
+    // read in S_RADDR so the data is there in S_RDATA.
+    // Region 1/2/3 (A/B/C) -> gemm_core host_sel 0/1/2.
+    always_comb begin
+        host_en    = 1'b0;
+        host_we    = 1'b0;
+        host_sel   = 2'd0;
+        host_addr  = '0;
+        host_wdata = '0;
+        if (wr_fire && (wr_rgn == RGN_A || wr_rgn == RGN_B)) begin
+            host_en    = 1'b1;
+            host_we    = 1'b1;
+            host_sel   = wr_rgn - 2'd1;
+            host_addr  = s_axil_awaddr[13:2];
+            host_wdata = s_axil_wdata;
+        end else if (state == S_RADDR && rd_rgn != RGN_REG) begin
+            host_en    = 1'b1;
+            host_sel   = rd_rgn - 2'd1;
+            host_addr  = raddr_q[13:2];
+        end
+    end
+
+    logic wr_reg, wr_ctrl, start_req;
+    assign wr_reg    = wr_fire && wr_rgn == RGN_REG;
+    assign wr_ctrl   = wr_reg && s_axil_awaddr == OFF_CTRL;
+    assign start_req = wr_ctrl && s_axil_wdata[0] && !core_busy;   // START while busy is ignored
+
+    always_ff @(posedge clk) begin
+        if (rst) begin
+            dim_m_q        <= '0;
+            dim_n_q        <= '0;
+            dim_k_q        <= '0;
+            irq_en_q       <= 1'b0;
+            done_q         <= 1'b0;
+            err_q          <= 1'b0;
+            cycles_q       <= '0;
+            start_pulse    <= 1'b0;
+            soft_rst_pulse <= 1'b0;
+        end else begin
+            start_pulse    <= 1'b0;
+            soft_rst_pulse <= 1'b0;
+
+            if (core_done) done_q   <= 1'b1;               // core_done is a 1-cycle pulse
+            if (core_busy) cycles_q <= cycles_q + 1;
+
+            if (wr_reg) begin
+                case (s_axil_awaddr)
+                    OFF_DIM_M: dim_m_q <= s_axil_wdata;
+                    OFF_DIM_N: dim_n_q <= s_axil_wdata;
+                    OFF_DIM_K: dim_k_q <= s_axil_wdata;
+                    OFF_CTRL: begin
+                        irq_en_q       <= s_axil_wdata[2];
+                        soft_rst_pulse <= s_axil_wdata[1];
+                    end
+                    default: ;                             // STATUS, CYCLES are read-only
+                endcase
+            end
+
+            if (start_req) begin                           // every START clears DONE and ERR
+                done_q <= 1'b0;
+                err_q  <= !dims_ok;
+                if (dims_ok) begin
+                    start_pulse <= 1'b1;
+                    cycles_q    <= '0;
+                end
+            end
+        end
+    end
+
+    always_comb begin
+        dims_ok = (dim_m_q >= 4) && (dim_m_q <= MAX_M) && (dim_m_q[1:0] == 2'b00)
+               && (dim_n_q >= 4) && (dim_n_q <= MAX_N) && (dim_n_q[1:0] == 2'b00)
+               && (dim_k_q >= 1) && (dim_k_q <= MAX_K);
+    end
+
+    always_comb begin
+        reg_rdata_mux = '0;                                // unused offsets read 0
+        case (raddr_q)
+            OFF_STATUS: reg_rdata_mux = {29'b0, err_q, done_q, core_busy};
+            OFF_DIM_M:  reg_rdata_mux = dim_m_q;
+            OFF_DIM_N:  reg_rdata_mux = dim_n_q;
+            OFF_DIM_K:  reg_rdata_mux = dim_k_q;
+            OFF_CYCLES: reg_rdata_mux = cycles_q;
+            default:    reg_rdata_mux = '0;
+        endcase
+    end
+
+    assign irq = irq_en_q & done_q;
 
 
 endmodule
